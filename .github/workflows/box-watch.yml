@@ -1,0 +1,68 @@
+name: box-watchdog
+
+# Внешний watchdog бокса capiros: джоба на GitHub-hosted раннере (ubuntu-latest
+# — это СНАРУЖИ бокса; не путать с [self-hosted] раннерами zenmoney-tools,
+# которые стоят на самом боксе и умирают вместе с ним). Расписание */30 — 288
+# прогонов/мес, в public-репо бесплатны. Секреты WATCHDOG_BOT_TOKEN /
+# WATCHDOG_CHAT_ID хранятся в Actions Secrets репозитория.
+#
+# Зонды:
+#   1. POST /ops/alerts без секрета → ждём 403: живы nginx+fpm+Laravel
+#      (маршрут бокчется в контроллере до любой логики);
+#   2. GET /app → 200: отдаётся PWA миниаппа;
+#   3. GET grafana.capiros.ru/api/health → 200: жив Grafana.
+#
+# Что НЕ ловим: deadman'ы внутри стека (Loki-алерт «Тишина» + watchdog.sh)
+# — они стережёт юниты изнутри; этот джоб ловит «весь бокс лёг».
+#
+# Правило GitHub: расписание глушится после 60 дней без коммитов в репо —
+# при письме-предупреждении включить одной кнопкой или сделать пустой коммит.
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: box-watch
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Зонды
+        id: probes
+        run: |
+          fail=""
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X POST \
+            -H 'Content-Type: application/json' -d '{}' \
+            https://capiros.ru/ops/alerts) || code=000
+          [ "$code" = "403" ] || fail="$fail /ops/alerts=$code"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+            https://capiros.ru/app) || code=000
+          [ "$code" = "200" ] || fail="$fail /app=$code"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+            https://grafana.capiros.ru/api/health) || code=000
+          [ "$code" = "200" ] || fail="$fail grafana=$code"
+          if [ -n "$fail" ]; then
+            echo "failed=$fail" >> "$GITHUB_OUTPUT"
+            echo "ПРОВАЛ:$fail"
+            exit 1
+          fi
+          echo "все зонды зелёные"
+
+      - name: Алерт в Telegram
+        if: failure()
+        env:
+          BOT: ${{ secrets.WATCHDOG_BOT_TOKEN }}
+          CHAT: ${{ secrets.WATCHDOG_CHAT_ID }}
+          FAILED: ${{ steps.probes.outputs.failed }}
+        run: |
+          curl -fsS --max-time 15 "https://api.telegram.org/bot${BOT}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT}" \
+            --data-urlencode "text=⛔ capiros: бокс не отвечает снаружи (watchdog $(date -u '+%d.%m %H:%M UTC')). Провал:${FAILED:- ?} — детали в логе джобы. watchdog.sh на боксе молчит вместе с ним." \
+            > /dev/null
