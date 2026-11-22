@@ -1,0 +1,43 @@
+name: keepalive
+
+# Страховка от правила GitHub «расписание глушится после 60 дней без
+# коммитов в репо»: коммитит текущую дату в keepalive.txt 1-го и 15-го,
+# тем самым сбрасывая 60-дневное окно для ВСЕХ расписаний репо
+# (включая box-watchdog). Пуш от встроенного GITHUB_TOKEN (contents: write)
+# — никаких ключей и cron на VPS: сторож расписаний не зависит от живости
+# бокса, который он сторожит.
+#
+# Себя этот воркфлоу тоже стережёт: его собственный коммит и есть та
+# активность, что продлевает окно. Раз в две недели — с запасом против
+# месячного цикла.
+
+on:
+  schedule:
+    - cron: '0 6 1,15 * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Пометка даты
+        run: |
+          date -u '+%Y-%m-%d %H:%M UTC' > keepalive.txt
+          git config user.name "watchdog-bot"
+          git config user.email "watchdog-bot@users.noreply.github.com"
+          git add keepalive.txt
+          if git diff --cached --quiet; then
+            echo "изменений нет — пропуск"
+            exit 0
+          fi
+          git commit -m "keepalive: $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git push

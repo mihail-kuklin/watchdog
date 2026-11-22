@@ -13,3 +13,7 @@ GitHub-hosted джоба каждые 30 минут зондит nginx+fpm+Larav
   бокс лёг», когда внутренние сторожа молчат вместе с боксом.
 
 Секреты: `WATCHDOG_BOT_TOKEN`, `WATCHDOG_CHAT_ID` (Settings → Secrets → Actions).
+
+Расписание не уснёт: [keepalive.yml](.github/workflows/keepalive.yml) 1-го и
+15-го коммитит дату в `keepalive.txt`, сбрасывая 60-дневное окно GitHub для
+всех расписаний репо (пуш от встроенного GITHUB_TOKEN, без ключей и cron на VPS).
