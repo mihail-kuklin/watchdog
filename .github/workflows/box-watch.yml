@@ -10,10 +10,17 @@ name: box-watchdog
 #   1. POST /ops/alerts без секрета → ждём 403: живы nginx+fpm+Laravel
 #      (маршрут бокчется в контроллере до любой логики);
 #   2. GET /app → 200: отдаётся PWA миниаппа;
-#   3. GET grafana.capiros.ru/api/health → 200: жив Grafana.
+#   3. GET grafana.capiros.ru/api/health → 200: жив Grafana;
+#   4. GET /ops/backup-age с Bearer-секретом (WATCHDOG_OPS_TOKEN =
+#      OPS_ALERT_SECRET прода): возраст последнего успешного бэкапа,
+#      старше 26 ч или метки нет → ⛔. Эндпоинт только честно отдаёт
+#      возраст, порог решает воркфлоу (1560 мин = одна пропущенная ночь
+#      с запасом на медленную WebDAV-верификацию).
 #
 # Что НЕ ловим: deadman'ы внутри стека (Loki-алерт «Тишина» + watchdog.sh)
-# — они стережёт юниты изнутри; этот джоб ловит «весь бокс лёг».
+# — они стережёт юниты изнутри; этот джоб ловит «весь бокс лёг» и
+# «бэкап несвеж/тихо скипнут» (молчаливый rc=0 «бэкап уже идёт» по
+# залипшему lock'у — без этого зонда его не видно ниоткуда).
 #
 # Правило GitHub: расписание глушится после 60 дней без коммитов в репо —
 # от этого стережёт keepalive.yml (коммитит дату 1-го и 15-го).
@@ -36,6 +43,8 @@ jobs:
     steps:
       - name: Зонды
         id: probes
+        env:
+          OPS_TOKEN: ${{ secrets.WATCHDOG_OPS_TOKEN }}
         run: |
           fail=""
           code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X POST \
@@ -48,6 +57,15 @@ jobs:
           code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
             https://grafana.capiros.ru/api/health) || code=000
           [ "$code" = "200" ] || fail="$fail grafana=$code"
+          # 4. возраст последнего успешного бэкапа (метку пишет backup-db.sh
+          #    после верификации; GET /ops/backup-age): jq -e роняет null/мусор
+          #    в пустую строку — это тоже провал, deadman не молчит без данных
+          resp=$(curl -sS --max-time 20 -H "Authorization: Bearer ${OPS_TOKEN}" \
+            https://capiros.ru/ops/backup-age) || resp=""
+          age=$(printf '%s' "$resp" | jq -er '.age_minutes // empty' 2>/dev/null) || age=""
+          if [ -z "$age" ] || [ "$age" -ge 1560 ]; then
+            fail="$fail backup-age=${age:-нет метки}"
+          fi
           if [ -n "$fail" ]; then
             echo "failed=$fail" >> "$GITHUB_OUTPUT"
             echo "ПРОВАЛ:$fail"
@@ -64,5 +82,5 @@ jobs:
         run: |
           curl -fsS --max-time 15 "https://api.telegram.org/bot${BOT}/sendMessage" \
             --data-urlencode "chat_id=${CHAT}" \
-            --data-urlencode "text=⛔ capiros: бокс не отвечает снаружи (watchdog $(date -u '+%d.%m %H:%M UTC')). Провал:${FAILED:- ?} — детали в логе джобы. watchdog.sh на боксе молчит вместе с ним." \
+            --data-urlencode "text=⛔ capiros: box-watch: провал:${FAILED:- ?} ($(date -u '+%d.%m %H:%M UTC')). Бокс-зонды = бокс лежит; backup-age = бэкап несвеж или тихо скипнут — /var/log/capiros-backup.log. watchdog.sh на боксе молчит вместе с ним." \
             > /dev/null
